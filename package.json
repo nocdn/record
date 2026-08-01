@@ -1,0 +1,20 @@
+{
+  "name": "@nocdn/record",
+  "version": "0.0.1",
+  "description": "A small library to record internal and external audio on mac easily through CLI",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "record": "bin/cli.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "start": "node ./bin/cli.js"
+  }
+}

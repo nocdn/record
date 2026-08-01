@@ -1,0 +1,95 @@
+name: Publish to npm
+
+# Before this can publish, configure the package on npmjs.com as a
+# Trusted Publisher for this GitHub repository and workflow filename
+# (`publish.yml`). Also make sure package.json has a repository.url that
+# exactly matches the GitHub repository URL.
+#
+# Publishes from the default release branch. Change `main` if your repo
+# uses a different release branch. Publishing is skipped automatically if
+# the package.json version is already on the npm registry, so a normal
+# code push does not fail the workflow.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Trusted publishing requires `id-token: write` so GitHub Actions can mint
+# the short-lived OIDC token that npm exchanges for a publish token.
+# `contents: read` is the minimum needed for actions/checkout.
+permissions:
+  id-token: write
+  contents: read
+
+# Avoid two pushes racing to publish the same version.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          # Trusted publishing requires Node >= 22.14.0 and npm >= 11.5.1.
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      # Belt-and-braces upgrade in case the bundled npm is older than 11.5.1.
+      - name: Ensure npm >= 11.5.1
+        run: npm install -g npm@^11.5.1 --no-audit --no-fund
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Run build
+        run: npm run build --if-present
+
+      - name: Run tests
+        run: npm test --if-present
+
+      # Compare the local package.json version to whatever is currently on
+      # npm. If they match there is nothing to publish, so skip cleanly.
+      - name: Check whether the current version is already published
+        id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          PUBLISH_FLAGS=""
+          if [[ "$NAME" == @*/* ]]; then
+            PUBLISH_FLAGS="--access public"
+          fi
+          echo "name=$NAME"       >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "publish_flags=$PUBLISH_FLAGS" >> "$GITHUB_OUTPUT"
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$VERSION is already on npm; skipping publish."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$VERSION is not on npm yet; will publish."
+          fi
+
+      # The npm CLI auto-detects the OIDC environment via id-token: write
+      # and exchanges it for a short-lived publish token, so no NODE_AUTH_TOKEN
+      # is needed. Trusted publishing automatically creates provenance for
+      # public packages published from public GitHub repositories. package.json
+      # sets publishConfig.access=public, and --access public is also passed for
+      # scoped packages to keep first publishes explicit.
+      - name: Publish to npm with trusted publishing
+        if: steps.check.outputs.published == 'false'
+        run: npm publish ${{ steps.check.outputs.publish_flags }}
