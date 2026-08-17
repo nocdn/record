@@ -1,0 +1,5 @@
+Shine MP3 encoder
+https://github.com/toots/shine
+
+Licensed under the GNU Library General Public License, version 2.
+See COPYING in this directory. The rest of @nocdn/record remains MIT.

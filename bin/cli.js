@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { access, mkdir, readFile } from "node:fs/promises";
+import { access, mkdir, readFile, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,7 +30,17 @@ try {
 
 async function record(args) {
   assertMacOS();
+  const previousTitle = process.title;
+  setTerminalTabTitle(args.onlyMic ? "Recording Audio" : "Recording Screen");
 
+  try {
+    await runRecording(args);
+  } finally {
+    restoreTerminalTabTitle(previousTitle);
+  }
+}
+
+async function runRecording(args) {
   const executable = await nativeExecutable();
   const outputPath = resolveOutputPath(args);
   await prepareOutputPath(outputPath);
@@ -74,8 +84,10 @@ async function record(args) {
   });
 
   let stopping = false;
+  let discarding = false;
   let finished = false;
   let sawSavedEvent = false;
+  let sawDiscardedEvent = false;
   let started = false;
   let lastSignalAt = 0;
   let resolveExit;
@@ -102,13 +114,13 @@ async function record(args) {
     switch (event.event) {
       case "started":
         started = true;
-        process.stdout.write(`● Recording ${recordingSummary(args)}\n`);
+        process.stdout.write(`●  Recording ${recordingSummary(args)}\n`);
         process.stdout.write(`Output: ${event.path}\n`);
         if (event.microphone) {
           process.stdout.write(`Microphone: ${event.microphone}\n`);
         }
         process.stdout.write("Duration: 00:00:00\n");
-        process.stdout.write("Press Ctrl+C to stop and save.\n");
+        process.stdout.write("Press Ctrl+C to stop and save, or Ctrl+D to discard.\n");
         break;
       case "progress":
         if (started && !stopping) {
@@ -119,10 +131,20 @@ async function record(args) {
         stopping = true;
         process.stdout.write("\nFinalizing recording…\n");
         break;
+      case "discarding":
+        stopping = true;
+        discarding = true;
+        process.stdout.write("\nDiscarding recording…\n");
+        break;
       case "saved":
         sawSavedEvent = true;
         finished = true;
         process.stdout.write(`Saved: ${event.path}\n`);
+        break;
+      case "discarded":
+        sawDiscardedEvent = true;
+        finished = true;
+        process.stdout.write("Discarded.\n");
         break;
       case "permission-required":
         process.stderr.write(`${event.message}\n`);
@@ -142,7 +164,7 @@ async function record(args) {
   child.on("close", (code, signal) => {
     output.close();
 
-    if (sawSavedEvent) {
+    if (sawSavedEvent || sawDiscardedEvent) {
       resolveExit();
       return;
     }
@@ -161,19 +183,23 @@ async function record(args) {
     );
   });
 
-  const stop = (force = false) => {
-    if (force) {
-      child.kill("SIGKILL");
-      return;
-    }
+  let forceQuitArmed = false;
 
+  const stop = () => {
     if (stopping) {
-      process.stderr.write("Press Ctrl+C again to force quit.\n");
       return;
     }
-
     stopping = true;
     child.stdin.write('{"command":"stop"}\n');
+  };
+
+  const discard = () => {
+    if (stopping || finished) {
+      return;
+    }
+    discarding = true;
+    stopping = true;
+    child.stdin.write('{"command":"discard"}\n');
   };
 
   const handleSignal = () => {
@@ -182,18 +208,44 @@ async function record(args) {
       return;
     }
     lastSignalAt = now;
-    stop(stopping);
+    if (!stopping) {
+      stop();
+      return;
+    }
+    if (!forceQuitArmed) {
+      forceQuitArmed = true;
+      process.stderr.write("Press Ctrl+C again to force quit.\n");
+      return;
+    }
+    child.kill("SIGKILL");
+  };
+  const handleStdinEnd = () => {
+    if (stopping || finished) {
+      return;
+    }
+    discard();
   };
   process.on("SIGINT", handleSignal);
   process.on("SIGTERM", handleSignal);
+  if (process.stdin.isTTY) {
+    process.stdin.on("end", handleStdinEnd);
+    process.stdin.resume();
+  }
 
   try {
     await exitPromise;
   } finally {
     process.removeListener("SIGINT", handleSignal);
     process.removeListener("SIGTERM", handleSignal);
+    if (process.stdin.isTTY) {
+      process.stdin.removeListener("end", handleStdinEnd);
+      process.stdin.pause();
+    }
     child.stdin.end();
-    if (!finished && !sawSavedEvent) {
+    if (discarding || sawDiscardedEvent) {
+      await removeIfExists(outputPath);
+    }
+    if (!finished && !sawSavedEvent && !sawDiscardedEvent) {
       output.close();
     }
   }
@@ -262,7 +314,7 @@ function parseArgs(argv, info) {
     systemAudio: true,
     cursor: true,
     display: 1,
-    fps: 30,
+    fps: 60,
     format: "mp4",
     onlyMic: false,
   };
@@ -378,7 +430,7 @@ function parseArgs(argv, info) {
 }
 
 function resolveOutputPath(args) {
-  const extension = args.onlyMic ? ".m4a" : `.${args.format}`;
+  const extension = args.onlyMic ? ".mp3" : `.${args.format}`;
   const requestedPath = args.output
     ? path.resolve(args.output)
     : args.onlyMic
@@ -390,6 +442,16 @@ function resolveOutputPath(args) {
   }
 
   return `${requestedPath}${extension}`;
+}
+
+async function removeIfExists(filePath) {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
 }
 
 async function prepareOutputPath(outputPath) {
@@ -405,6 +467,10 @@ async function prepareOutputPath(outputPath) {
 }
 
 async function nativeExecutable() {
+  if (process.env.RECORD_NATIVE) {
+    return process.env.RECORD_NATIVE;
+  }
+
   const executable = fileURLToPath(
     new URL("../vendor/Record.app/Contents/MacOS/record-native", import.meta.url),
   );
@@ -512,14 +578,37 @@ Options:
   -v, --version                    Show the package version.
   -o, --output <path>              Save to this path instead of the default location.
       --only-mic, --mic-only, --microphone
-                                   Record only the microphone into the current directory.
+                                   Record only the microphone as MP3 in the current directory.
       --no-mic                     Disable microphone capture.
       --mic <name>                 Select a microphone by name (default: built-in Mac mic).
       --list-mics                  List microphones that --mic can select.
       --no-system-audio            Disable system/application audio.
       --display <number>           Capture display number (default: 1).
-      --fps <number>               Capture frame rate (default: 30).
-      --format <mp4|mov>           Output container (default: mp4).
+      --fps <number>               Capture frame rate (default: 60).
+      --format <mp4|mov>           Video container (default: mp4). Audio-only default is MP3.
       --no-cursor                  Hide the mouse cursor.
+
+Keys:
+  Ctrl+C                           Stop and save.
+  Ctrl+D                           Discard the recording.
 `;
+}
+
+function setTerminalTabTitle(title) {
+  if (!process.stdout.isTTY) {
+    return;
+  }
+  process.title = title;
+  process.stdout.write(`\x1b]0;${title}\x07`);
+  process.stdout.write(`\x1b]1;${title}\x07`);
+}
+
+function restoreTerminalTabTitle(previousTitle) {
+  if (!process.stdout.isTTY) {
+    return;
+  }
+  const title = previousTitle || "record";
+  process.title = title;
+  process.stdout.write(`\x1b]0;${title}\x07`);
+  process.stdout.write(`\x1b]1;${title}\x07`);
 }

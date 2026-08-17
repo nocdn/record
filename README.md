@@ -26,7 +26,7 @@ npx @nocdn/record permissions
 | `-h`, `--help` | show help |
 | `-v`, `--version` | show version |
 | `-o`, `--output <path>` | save to a specific path instead of the default location |
-| `--only-mic`, `--mic-only`, `--microphone` | record only the microphone into the current directory |
+| `--only-mic`, `--mic-only`, `--microphone` | record only the microphone as MP3 in the current directory |
 | `--no-mic` | disable microphone capture |
 | `--mic <name>` | select a microphone by name; default is the built-in Mac microphone, not the current system input |
 | `--list-mics` | list microphones that `--mic` can select |
@@ -38,11 +38,11 @@ npx @nocdn/record permissions
 
 With no flags, the command records the primary display at native resolution,
 system audio, and the built-in Mac microphone (not whichever input macOS
-currently has set as default), with a visible cursor, at 30 fps, H.264/AAC,
+currently has set as default), with a visible cursor, at 60 fps, H.264/AAC,
 MP4, and a timestamped file in `~/Movies`. `--no-mic` and `--no-system-audio`
 turn those audio sources off.
 
-`--only-mic` skips the screen and system audio and writes a timestamped `.m4a`
+`--only-mic` skips the screen and system audio and writes a timestamped `.mp3`
 file in the current working directory. Combine it with `--mic <name>` to pick a
 specific microphone, or `-o` to choose a path. Names can be a full device name
 or a unique substring, for example `--mic "AirPods"`.
@@ -53,9 +53,9 @@ List the devices `--mic` can use:
 npx @nocdn/record mics
 ```
 
-Stop with `Ctrl+C`. The first interrupt asks the native recorder to finalize
-the media file; a second interrupt is an emergency force quit and may leave an
-unusable file.
+Stop with `Ctrl+C` to finalize and save. `Ctrl+D` discards the recording and
+deletes the output file. A second `Ctrl+C` is an emergency force quit and may
+leave an unusable file.
 
 ## Permissions
 
@@ -94,6 +94,8 @@ Apple and staples the ticket.
 The package is intentionally built with plain ESM JavaScript and native Apple
 frameworks; it has no npm runtime dependencies and does not require FFmpeg,
 Homebrew, Xcode, or a virtual audio driver on the recording machine.
+Audio-only MP3 encoding uses the Shine encoder (LGPL-2.0) in
+`native/third_party/shine`.
 
 ## Publishing
 

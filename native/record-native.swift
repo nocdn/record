@@ -10,7 +10,7 @@ import ScreenCaptureKit
 struct NativeOptions {
     var outputPath: String = ""
     var display: Int = 1
-    var fps: Double = 30
+    var fps: Double = 60
     var format: String = "mp4"
     var microphone = true
     var microphoneName: String?
@@ -111,6 +111,9 @@ final class Recorder: NSObject, SCRecordingOutputDelegate, SCStreamDelegate, AVC
     private var completed = false
     private var completionStatus: Int32 = 0
     private var selectedMicrophoneName: String?
+    private var pendingMP3URL: URL?
+    private var captureURL: URL?
+    private var discardRequested = false
 
     init(options: NativeOptions) {
         self.options = options
@@ -180,9 +183,20 @@ final class Recorder: NSObject, SCRecordingOutputDelegate, SCStreamDelegate, AVC
         }
 
         let outputURL = URL(fileURLWithPath: options.outputPath)
+        let captureURL: URL
+        if outputURL.pathExtension.lowercased() == "mp3" {
+            captureURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("record-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)")
+                .appendingPathExtension("caf")
+            pendingMP3URL = outputURL
+        } else {
+            captureURL = outputURL
+        }
+        self.captureURL = captureURL
+
         fileOutput.startRecording(
-            to: outputURL,
-            outputFileType: audioFileType(for: outputURL),
+            to: captureURL,
+            outputFileType: audioFileType(for: captureURL),
             recordingDelegate: self
         )
     }
@@ -227,6 +241,7 @@ final class Recorder: NSObject, SCRecordingOutputDelegate, SCStreamDelegate, AVC
 
         let recordingConfiguration = SCRecordingOutputConfiguration()
         recordingConfiguration.outputURL = URL(fileURLWithPath: options.outputPath)
+        captureURL = recordingConfiguration.outputURL
         recordingConfiguration.videoCodecType = AVVideoCodecType.h264
         recordingConfiguration.outputFileType = options.format == "mov"
             ? .mov
@@ -288,7 +303,9 @@ final class Recorder: NSObject, SCRecordingOutputDelegate, SCStreamDelegate, AVC
             }
 
             for line in input.split(separator: "\n") {
-                if line.contains("\"command\":\"stop\"") {
+                if line.contains("\"command\":\"discard\"") {
+                    self?.requestStop(discard: true)
+                } else if line.contains("\"command\":\"stop\"") {
                     self?.requestStop()
                 }
             }
@@ -310,22 +327,29 @@ final class Recorder: NSObject, SCRecordingOutputDelegate, SCStreamDelegate, AVC
 
     private var completionContinuation: CheckedContinuation<Int32, Never>?
 
-    private func requestStop() {
+    private func requestStop(discard: Bool = false) {
         stateLock.lock()
         if stopRequested {
             stateLock.unlock()
             return
         }
+        if discard {
+            discardRequested = true
+        }
         stopRequested = true
+        let discarding = discardRequested
         stateLock.unlock()
 
-        emit(["event": "finalizing"])
+        emit(["event": discarding ? "discarding" : "finalizing"])
         progressTimer?.cancel()
         FileHandle.standardInput.readabilityHandler = nil
 
         if let audioFileOutput {
             if audioFileOutput.isRecording {
                 audioFileOutput.stopRecording()
+            } else if discarding {
+                captureSession?.stopRunning()
+                finishDiscard()
             } else {
                 captureSession?.stopRunning()
                 complete(status: 1)
@@ -334,14 +358,25 @@ final class Recorder: NSObject, SCRecordingOutputDelegate, SCStreamDelegate, AVC
         }
 
         guard let stream else {
-            complete(status: 1)
+            if discarding {
+                finishDiscard()
+            } else {
+                complete(status: 1)
+            }
             return
         }
 
         stream.stopCapture { [weak self] error in
+            guard let self else {
+                return
+            }
             if let error {
-                self?.emitError(error.localizedDescription)
-                self?.complete(status: 1)
+                if self.discardRequested {
+                    self.finishDiscard()
+                    return
+                }
+                self.emitError(error.localizedDescription)
+                self.complete(status: 1)
             }
         }
     }
@@ -566,6 +601,8 @@ final class Recorder: NSObject, SCRecordingOutputDelegate, SCStreamDelegate, AVC
             return .aiff
         case "mp4":
             return .mp4
+        case "mp3":
+            return .caf
         default:
             return .m4a
         }
@@ -591,11 +628,19 @@ final class Recorder: NSObject, SCRecordingOutputDelegate, SCStreamDelegate, AVC
     }
 
     func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
+        if discardRequested {
+            finishDiscard()
+            return
+        }
         emitError(error.localizedDescription)
         complete(status: 1)
     }
 
     func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
+        if discardRequested {
+            finishDiscard()
+            return
+        }
         emit(["event": "saved", "path": options.outputPath])
         complete(status: 0)
     }
@@ -622,13 +667,60 @@ final class Recorder: NSObject, SCRecordingOutputDelegate, SCStreamDelegate, AVC
         error: Error?
     ) {
         captureSession?.stopRunning()
-        if let error {
+        if discardRequested {
+            finishDiscard(extra: outputFileURL)
+            return
+        }
+
+        if let error, !recordingFinishedSuccessfully(error) {
             emitError(error.localizedDescription)
+            if pendingMP3URL != nil {
+                try? FileManager.default.removeItem(at: outputFileURL)
+            }
             complete(status: 1)
             return
         }
 
+        if let mp3URL = pendingMP3URL {
+            let status = record_encode_audio_file_to_mp3(
+                outputFileURL.path,
+                mp3URL.path
+            )
+            try? FileManager.default.removeItem(at: outputFileURL)
+            if status != 0 {
+                emitError("Could not encode the recording as MP3.")
+                complete(status: 1)
+                return
+            }
+        }
+
         emit(["event": "saved", "path": options.outputPath])
+        complete(status: 0)
+    }
+
+    private func recordingFinishedSuccessfully(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if let finished = nsError.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool {
+            return finished
+        }
+        return false
+    }
+
+    private func finishDiscard(extra: URL? = nil) {
+        var urls = [URL(fileURLWithPath: options.outputPath)]
+        if let pendingMP3URL {
+            urls.append(pendingMP3URL)
+        }
+        if let captureURL {
+            urls.append(captureURL)
+        }
+        if let extra {
+            urls.append(extra)
+        }
+        for url in urls {
+            try? FileManager.default.removeItem(at: url)
+        }
+        emit(["event": "discarded", "path": options.outputPath])
         complete(status: 0)
     }
 }

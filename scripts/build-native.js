@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { access, copyFile, mkdir, rm } from "node:fs/promises";
+import { access, copyFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,9 @@ import { execFileSync } from "node:child_process";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const sourcePath = path.join(projectRoot, "native", "record-native.swift");
+const encodeSourcePath = path.join(projectRoot, "native", "mp3_encode.c");
+const bridgingHeaderPath = path.join(projectRoot, "native", "record-bridging.h");
+const shinePath = path.join(projectRoot, "native", "third_party", "shine");
 const plistPath = path.join(projectRoot, "native", "Info.plist");
 const entitlementsPath = path.join(projectRoot, "native", "Record.entitlements");
 const vendorPath = path.join(projectRoot, "vendor");
@@ -41,10 +44,43 @@ const architectures = process.env.RECORD_NATIVE_ARCH
 const temporaryOutputs = architectures.map((architecture) =>
   path.join(os.tmpdir(), `record-native-${architecture}-${process.pid}`),
 );
+const shineSources = (await readdir(shinePath))
+  .filter((name) => name.endsWith(".c"))
+  .map((name) => path.join(shinePath, name));
+const cSources = [...shineSources, encodeSourcePath];
+const temporaryObjects = [];
 
 try {
   for (let index = 0; index < architectures.length; index += 1) {
     const architecture = architectures[index];
+    const objectFiles = [];
+    for (const source of cSources) {
+      const objectPath = path.join(
+        os.tmpdir(),
+        `record-${architecture}-${path.basename(source, ".c")}-${process.pid}.o`,
+      );
+      temporaryObjects.push(objectPath);
+      execFileSync(
+        "xcrun",
+        [
+          "clang",
+          "-c",
+          "-O2",
+          "-std=c99",
+          "-arch",
+          architecture,
+          "-mmacosx-version-min=15.0",
+          "-I",
+          shinePath,
+          "-o",
+          objectPath,
+          source,
+        ],
+        { cwd: projectRoot, stdio: "inherit" },
+      );
+      objectFiles.push(objectPath);
+    }
+
     execFileSync(
       "xcrun",
       [
@@ -56,10 +92,14 @@ try {
         "-whole-module-optimization",
         "-target",
         `${architecture}-apple-macosx15.0`,
+        "-import-objc-header",
+        bridgingHeaderPath,
         "-framework",
         "ScreenCaptureKit",
         "-framework",
         "AVFoundation",
+        "-framework",
+        "AudioToolbox",
         "-framework",
         "CoreMedia",
         "-framework",
@@ -68,6 +108,7 @@ try {
         "CoreAudio",
         "-o",
         temporaryOutputs[index],
+        ...objectFiles,
         sourcePath,
       ],
       { cwd: projectRoot, stdio: "inherit" },
@@ -113,6 +154,8 @@ try {
   console.log(`Built ${path.relative(projectRoot, appPath)}`);
 } finally {
   await Promise.all(
-    temporaryOutputs.map((temporaryOutput) => rm(temporaryOutput, { force: true })),
+    [...temporaryOutputs, ...temporaryObjects].map((temporaryOutput) =>
+      rm(temporaryOutput, { force: true }),
+    ),
   );
 }
