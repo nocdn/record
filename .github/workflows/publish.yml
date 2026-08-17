@@ -1,22 +1,24 @@
 name: Publish to npm
 
-# Before this can publish, configure the package on npmjs.com as a
-# Trusted Publisher for this GitHub repository and workflow filename
-# (`publish.yml`). Also make sure package.json has a repository.url that
-# exactly matches the GitHub repository URL.
+# Builds the native helper on a GitHub-hosted macOS 26 runner, signs it with a
+# Developer ID Application certificate, notarizes and staples it, then publishes
+# to npm with trusted publishing. Keep this filename as `publish.yml` so the npm
+# trusted publisher configuration continues to match.
 #
-# Publishes from the default release branch. Change `main` if your repo
-# uses a different release branch. Publishing is skipped automatically if
-# the package.json version is already on the npm registry, so a normal
-# code push does not fail the workflow.
+# Before a first publish:
+# 1. Add `repository.url` to package.json so it exactly matches the GitHub repo.
+# 2. On npmjs.com, configure this repository as a trusted publisher for
+#    workflow filename `publish.yml`.
+# 3. Add the Apple signing and notarization secrets listed in the README.
 on:
   push:
     branches:
       - main
+  pull_request:
   workflow_dispatch:
 
-# Trusted publishing requires `id-token: write` so GitHub Actions can mint
-# the short-lived OIDC token that npm exchanges for a publish token.
+# Trusted publishing requires `id-token: write` so GitHub Actions can mint the
+# short-lived OIDC token that npm exchanges for a publish token.
 # `contents: read` is the minimum needed for actions/checkout.
 permissions:
   id-token: write
@@ -24,17 +26,31 @@ permissions:
 
 # Avoid two pushes racing to publish the same version.
 concurrency:
-  group: publish-${{ github.ref }}
+  group: publish-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: Publish package
-    runs-on: ubuntu-latest
+    name: Build and publish
+    # macos-26 is the current GitHub-hosted Apple Silicon image (M1, macOS 26).
+    # The native helper targets macOS 15+ and is compiled as a universal
+    # arm64 + x86_64 binary on this arm64 runner.
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    env:
+      RECORD_SIGNING_IDENTITY: "Developer ID Application: Bartosz Bak (7CAU3XFRLQ)"
+      APPLE_TEAM_ID: 7CAU3XFRLQ
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Show Xcode and Swift versions
+        run: |
+          xcodebuild -version
+          xcrun swiftc --version
+          uname -m
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -44,7 +60,6 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
-      # Belt-and-braces upgrade in case the bundled npm is older than 11.5.1.
       - name: Ensure npm >= 11.5.1
         run: npm install -g npm@^11.5.1 --no-audit --no-fund
 
@@ -56,14 +71,9 @@ jobs:
             npm install --no-audit --no-fund
           fi
 
-      - name: Run build
-        run: npm run build --if-present
-
       - name: Run tests
         run: npm test --if-present
 
-      # Compare the local package.json version to whatever is currently on
-      # npm. If they match there is nothing to publish, so skip cleanly.
       - name: Check whether the current version is already published
         id: check
         run: |
@@ -73,23 +83,110 @@ jobs:
           if [[ "$NAME" == @*/* ]]; then
             PUBLISH_FLAGS="--access public"
           fi
-          echo "name=$NAME"       >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "publish_flags=$PUBLISH_FLAGS" >> "$GITHUB_OUTPUT"
-          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::$NAME@$VERSION is already on npm; skipping publish."
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::$NAME@$VERSION is not on npm yet; will publish."
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Pull request; will compile the helper but will not notarize or publish."
+            exit 0
           fi
 
-      # The npm CLI auto-detects the OIDC environment via id-token: write
-      # and exchanges it for a short-lived publish token, so no NODE_AUTH_TOKEN
-      # is needed. Trusted publishing automatically creates provenance for
-      # public packages published from public GitHub repositories. package.json
-      # sets publishConfig.access=public, and --access public is also passed for
-      # scoped packages to keep first publishes explicit.
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$VERSION is already on npm; skipping publish."
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$VERSION is not on npm yet; will sign, notarize, and publish."
+          fi
+
+      - name: Require Apple signing secrets for a release
+        if: steps.check.outputs.release == 'true'
+        env:
+          APPLE_DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          missing=0
+          if [[ -z "$APPLE_DEVELOPER_ID_P12" || -z "$APPLE_DEVELOPER_ID_P12_PASSWORD" ]]; then
+            echo "::error::Add APPLE_DEVELOPER_ID_P12 and APPLE_DEVELOPER_ID_P12_PASSWORD repository secrets."
+            missing=1
+          fi
+          if [[ -n "$APPLE_API_KEY" && -n "$APPLE_API_KEY_ID" ]]; then
+            if [[ -z "$APPLE_API_ISSUER" ]]; then
+              echo "::error::Team App Store Connect API keys also need APPLE_API_ISSUER."
+              missing=1
+            fi
+          elif [[ -z "$APPLE_ID" || -z "$APPLE_APP_SPECIFIC_PASSWORD" ]]; then
+            echo "::error::Add APPLE_API_KEY, APPLE_API_KEY_ID, and APPLE_API_ISSUER, or APPLE_ID and APPLE_APP_SPECIFIC_PASSWORD."
+            missing=1
+          fi
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Import Developer ID certificate
+        if: steps.check.outputs.release == 'true'
+        env:
+          APPLE_DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/record-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          printf '%s' "$APPLE_DEVELOPER_ID_P12" | openssl base64 -d -A -out "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          rm -f "$CERTIFICATE_PATH"
+
+      - name: Build native helper
+        env:
+          RECORD_NATIVE_ARCH: ${{ steps.check.outputs.release == 'true' && 'arm64,x86_64' || 'arm64' }}
+          RECORD_SIGNING_IDENTITY: "${{ steps.check.outputs.release == 'true' && format('Developer ID Application: Bartosz Bak ({0})', env.APPLE_TEAM_ID) || '-' }}"
+        run: npm run build
+
+      - name: Notarize and staple Record.app
+        if: steps.check.outputs.release == 'true'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: npm run notarize
+
+      - name: Verify the bundled helper
+        run: |
+          codesign --verify --deep --strict --verbose=2 vendor/Record.app
+          codesign -dv --verbose=4 vendor/Record.app
+          file vendor/Record.app/Contents/MacOS/record-native
+          if [[ "${{ steps.check.outputs.release }}" == "true" ]]; then
+            xcrun stapler validate vendor/Record.app
+          fi
+
       - name: Publish to npm with trusted publishing
-        if: steps.check.outputs.published == 'false'
+        if: steps.check.outputs.release == 'true'
+        env:
+          RECORD_SKIP_NATIVE_BUILD: "1"
         run: npm publish ${{ steps.check.outputs.publish_flags }}

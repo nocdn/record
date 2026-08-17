@@ -1,37 +1,292 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
 
-async function main() {
-  const packageInfo = await readPackageInfo();
+import { access, mkdir, readFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
+import { spawn } from "node:child_process";
+
+const packageInfo = await readPackageInfo();
+
+try {
+  const args = parseArgs(process.argv.slice(2), packageInfo);
+
+  if (args.help) {
+    process.stdout.write(helpText(packageInfo));
+  } else if (args.version) {
+    process.stdout.write(`${packageInfo.version}\n`);
+  } else if (args.command === "permissions") {
+    await reportPermissions();
+  } else if (args.command === "mics") {
+    await listMicrophones();
+  } else {
+    await record(args);
+  }
+} catch (error) {
+  process.stderr.write(`Error: ${error.message}\n`);
+  process.exitCode = 1;
+}
+
+async function record(args) {
+  assertMacOS();
+
+  const executable = await nativeExecutable();
+  const outputPath = resolveOutputPath(args);
+  await prepareOutputPath(outputPath);
+  const nativeArgs = ["--output", outputPath];
+
+  if (args.onlyMic) {
+    nativeArgs.push("--only-mic");
+    if (args.microphoneName) {
+      nativeArgs.push("--mic", args.microphoneName);
+    }
+  } else {
+    nativeArgs.push(
+      "--display",
+      String(args.display),
+      "--fps",
+      String(args.fps),
+      "--format",
+      args.format,
+    );
+
+    if (!args.microphone) {
+      nativeArgs.push("--no-mic");
+    }
+
+    if (!args.systemAudio) {
+      nativeArgs.push("--no-system-audio");
+    }
+
+    if (args.microphoneName) {
+      nativeArgs.push("--mic", args.microphoneName);
+    }
+
+    if (!args.cursor) {
+      nativeArgs.push("--no-cursor");
+    }
+  }
+
+  const child = spawn(executable, nativeArgs, {
+    detached: true,
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+
+  let stopping = false;
+  let finished = false;
+  let sawSavedEvent = false;
+  let started = false;
+  let lastSignalAt = 0;
+  let resolveExit;
+  let rejectExit;
+  const exitPromise = new Promise((resolve, reject) => {
+    resolveExit = resolve;
+    rejectExit = reject;
+  });
+
+  const output = createInterface({ input: child.stdout });
+  output.on("line", (line) => {
+    if (!line.trim()) {
+      return;
+    }
+
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      process.stderr.write(`Recorder output: ${line}\n`);
+      return;
+    }
+
+    switch (event.event) {
+      case "started":
+        started = true;
+        process.stdout.write(`● Recording ${recordingSummary(args)}\n`);
+        process.stdout.write(`Output: ${event.path}\n`);
+        if (event.microphone) {
+          process.stdout.write(`Microphone: ${event.microphone}\n`);
+        }
+        process.stdout.write("Duration: 00:00:00\n");
+        process.stdout.write("Press Ctrl+C to stop and save.\n");
+        break;
+      case "progress":
+        if (started && !stopping) {
+          process.stdout.write(`\rDuration: ${formatDuration(event.duration)} `);
+        }
+        break;
+      case "finalizing":
+        stopping = true;
+        process.stdout.write("\nFinalizing recording…\n");
+        break;
+      case "saved":
+        sawSavedEvent = true;
+        finished = true;
+        process.stdout.write(`Saved: ${event.path}\n`);
+        break;
+      case "permission-required":
+        process.stderr.write(`${event.message}\n`);
+        break;
+      case "error":
+        process.stderr.write(`Recorder error: ${event.message}\n`);
+        break;
+      default:
+        process.stderr.write(`Recorder event: ${line}\n`);
+    }
+  });
+
+  child.on("error", (error) => {
+    rejectExit(error);
+  });
+
+  child.on("close", (code, signal) => {
+    output.close();
+
+    if (sawSavedEvent) {
+      resolveExit();
+      return;
+    }
+
+    if (signal) {
+      rejectExit(new Error(`Recorder stopped by ${signal}.`));
+      return;
+    }
+
+    rejectExit(
+      new Error(
+        code === 2
+          ? "Recording permissions are required. Grant them in System Settings, then run the command again."
+          : `Recorder exited with code ${code ?? "unknown"}.`,
+      ),
+    );
+  });
+
+  const stop = (force = false) => {
+    if (force) {
+      child.kill("SIGKILL");
+      return;
+    }
+
+    if (stopping) {
+      process.stderr.write("Press Ctrl+C again to force quit.\n");
+      return;
+    }
+
+    stopping = true;
+    child.stdin.write('{"command":"stop"}\n');
+  };
+
+  const handleSignal = () => {
+    const now = Date.now();
+    if (now - lastSignalAt < 500) {
+      return;
+    }
+    lastSignalAt = now;
+    stop(stopping);
+  };
+  process.on("SIGINT", handleSignal);
+  process.on("SIGTERM", handleSignal);
 
   try {
-    const args = parseArgs(process.argv.slice(2), packageInfo);
-
-    if (args.help) {
-      process.stdout.write(helpText(packageInfo));
-      return;
+    await exitPromise;
+  } finally {
+    process.removeListener("SIGINT", handleSignal);
+    process.removeListener("SIGTERM", handleSignal);
+    child.stdin.end();
+    if (!finished && !sawSavedEvent) {
+      output.close();
     }
-
-    if (args.version) {
-      process.stdout.write(`${packageInfo.version}\n`);
-      return;
-    }
-
-    console.log("Hello World!");
-  } catch (error) {
-    process.stderr.write(`Error: ${error.message}\n`);
-    process.exitCode = 1;
   }
 }
 
-function parseArgs(argv, packageInfo) {
+async function listMicrophones() {
+  assertMacOS();
+
+  const executable = await nativeExecutable();
+  const child = spawn(executable, ["--list-mics"], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+
+  const output = createInterface({ input: child.stdout });
+  output.on("line", (line) => process.stdout.write(`${line}\n`));
+
+  await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      output.close();
+      if (signal) {
+        reject(new Error(`Microphone list stopped by ${signal}.`));
+      } else if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error("No microphones were found."));
+      }
+    });
+  });
+}
+
+async function reportPermissions() {
+  assertMacOS();
+
+  const executable = await nativeExecutable();
+  const child = spawn(executable, ["--permissions"], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+
+  const output = createInterface({ input: child.stdout });
+  output.on("line", (line) => process.stdout.write(`${line}\n`));
+
+  await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      output.close();
+      if (signal) {
+        reject(new Error(`Permission check stopped by ${signal}.`));
+      } else if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error("One or more recording permissions are not granted."));
+      }
+    });
+  });
+}
+
+function parseArgs(argv, info) {
   const args = {
+    command: null,
     help: false,
     version: false,
+    output: null,
+    microphone: true,
+    microphoneName: null,
+    systemAudio: true,
+    cursor: true,
+    display: 1,
+    fps: 30,
+    format: "mp4",
+    onlyMic: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+
+    if (arg === "permissions" && args.command === null) {
+      args.command = "permissions";
+      continue;
+    }
+
+    if (
+      (arg === "mics" || arg === "microphones") &&
+      args.command === null
+    ) {
+      args.command = "mics";
+      continue;
+    }
+
+    if (arg === "--list-mics") {
+      args.command = "mics";
+      continue;
+    }
 
     if (arg === "-h" || arg === "--help") {
       args.help = true;
@@ -43,39 +298,228 @@ function parseArgs(argv, packageInfo) {
       continue;
     }
 
+    if (arg === "--output" || arg === "-o") {
+      args.output = requiredValue(argv, ++index, arg);
+      continue;
+    }
+
+    if (arg === "--only-mic" || arg === "--mic-only" || arg === "--microphone") {
+      args.onlyMic = true;
+      args.microphone = true;
+      args.systemAudio = false;
+      continue;
+    }
+
+    if (arg === "--no-mic") {
+      args.microphone = false;
+      continue;
+    }
+
+    if (arg === "--no-system-audio") {
+      args.systemAudio = false;
+      continue;
+    }
+
+    if (arg === "--no-cursor") {
+      args.cursor = false;
+      continue;
+    }
+
+    if (arg === "--display") {
+      args.display = positiveInteger(requiredValue(argv, ++index, arg), arg);
+      continue;
+    }
+
+    if (arg === "--mic") {
+      args.microphoneName = requiredValue(argv, ++index, arg);
+      args.microphone = true;
+      continue;
+    }
+
+    if (arg === "--fps") {
+      args.fps = positiveNumber(requiredValue(argv, ++index, arg), arg);
+      continue;
+    }
+
+    if (arg === "--format") {
+      args.format = requiredValue(argv, ++index, arg).toLowerCase();
+      if (args.format !== "mp4" && args.format !== "mov") {
+        throw new Error('The format must be "mp4" or "mov".');
+      }
+      continue;
+    }
+
     if (arg.startsWith("-")) {
       throw new Error(
-        `Unknown option "${arg}". Run ${packageInfo.name} --help for usage.`,
+        `Unknown option "${arg}". Run ${info.name} --help for usage.`,
       );
     }
+
+    throw new Error(
+      `Unexpected argument "${arg}". Run ${info.name} --help for usage.`,
+    );
+  }
+
+  if (args.help && args.version) {
+    throw new Error("Choose either --help or --version.");
+  }
+
+  if (args.command && (args.help || args.version)) {
+    throw new Error(
+      `The ${args.command} command cannot be combined with a flag.`,
+    );
+  }
+
+  if (args.onlyMic && !args.microphone) {
+    throw new Error("The --only-mic option cannot be combined with --no-mic.");
   }
 
   return args;
 }
 
+function resolveOutputPath(args) {
+  const extension = args.onlyMic ? ".m4a" : `.${args.format}`;
+  const requestedPath = args.output
+    ? path.resolve(args.output)
+    : args.onlyMic
+      ? path.join(process.cwd(), `${timestampFilename()}${extension}`)
+      : path.join(os.homedir(), "Movies", `${timestampFilename()}${extension}`);
+
+  if (path.extname(requestedPath)) {
+    return requestedPath;
+  }
+
+  return `${requestedPath}${extension}`;
+}
+
+async function prepareOutputPath(outputPath) {
+  await mkdir(path.dirname(outputPath), { recursive: true });
+  try {
+    await access(outputPath);
+    throw new Error(`The output file already exists: ${outputPath}`);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+async function nativeExecutable() {
+  const executable = fileURLToPath(
+    new URL("../vendor/Record.app/Contents/MacOS/record-native", import.meta.url),
+  );
+
+  try {
+    await access(executable);
+  } catch {
+    throw new Error(
+      "The native recorder is not built. Run `npm run build` and try again.",
+    );
+  }
+
+  return executable;
+}
+
+function assertMacOS() {
+  if (process.platform !== "darwin") {
+    throw new Error("@nocdn/record currently supports macOS only.");
+  }
+}
+
+function requiredValue(argv, index, flag) {
+  const value = argv[index];
+  if (!value || value.startsWith("-")) {
+    throw new Error(`Option ${flag} requires a value.`);
+  }
+  return value;
+}
+
+function positiveInteger(value, flag) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1) {
+    throw new Error(`Option ${flag} must be a positive integer.`);
+  }
+  return number;
+}
+
+function positiveNumber(value, flag) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0 || number > 120) {
+    throw new Error(`Option ${flag} must be greater than 0 and no more than 120.`);
+  }
+  return number;
+}
+
+function formatDuration(seconds) {
+  const totalSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainder = totalSeconds % 60;
+  return [hours, minutes, remainder]
+    .map((value) => String(value).padStart(2, "0"))
+    .join(":");
+}
+
+function timestampFilename(date = new Date()) {
+  const parts = [
+    date.getFullYear(),
+    date.getMonth() + 1,
+    date.getDate(),
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+  ].map((value) => String(value).padStart(2, "0"));
+
+  return `recording-${parts.slice(0, 3).join("-")}-${parts.slice(3).join("")}`;
+}
+
 async function readPackageInfo() {
-  const packageJsonPath = new URL("../package.json", import.meta.url);
-  const rawPackageJson = await readFile(packageJsonPath, "utf8");
+  const packageJsonUrl = new URL("../package.json", import.meta.url);
+  const rawPackageJson = await readFile(packageJsonUrl, "utf8");
   return JSON.parse(rawPackageJson);
 }
 
-function helpText(packageInfo) {
-  const command = packageInfo.name;
-  const description = packageInfo.description || "";
-  return `${command} ${packageInfo.version}
+function recordingSummary(args) {
+  if (args.onlyMic) {
+    return "microphone";
+  }
+
+  return `screen${args.systemAudio ? ", system audio" : ""}${args.microphone ? ", microphone" : ""}`;
+}
+
+function helpText(info) {
+  const command = info.name;
+  const description = info.description || "";
+  return `${command} ${info.version}
 ${description ? `\n${description}\n` : ""}
 Usage:
   ${command} [options]
+  ${command} --only-mic
+  ${command} mics
+  ${command} permissions
 
 Examples:
   ${command}
-  ${command} --help
-  ${command} --version
+  ${command} --output meeting.mp4
+  ${command} --only-mic
+  ${command} --mic "AirPods"
+  ${command} mics
+  ${command} --no-mic --no-system-audio
+  ${command} permissions
 
 Options:
   -h, --help                       Show this help text.
   -v, --version                    Show the package version.
+  -o, --output <path>              Save to this path instead of the default location.
+      --only-mic, --mic-only, --microphone
+                                   Record only the microphone into the current directory.
+      --no-mic                     Disable microphone capture.
+      --mic <name>                 Select a microphone by name (default: built-in Mac mic).
+      --list-mics                  List microphones that --mic can select.
+      --no-system-audio            Disable system/application audio.
+      --display <number>           Capture display number (default: 1).
+      --fps <number>               Capture frame rate (default: 30).
+      --format <mp4|mov>           Output container (default: mp4).
+      --no-cursor                  Hide the mouse cursor.
 `;
 }
-
-main();

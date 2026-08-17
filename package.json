@@ -1,7 +1,7 @@
 {
   "name": "@nocdn/record",
   "version": "0.0.1",
-  "description": "A small library to record internal and external audio on mac easily through CLI",
+  "description": "Record the Mac screen, system audio, and microphone from the command line",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -9,12 +9,18 @@
   },
   "files": [
     "bin",
+    "native",
+    "vendor",
     "README.md"
   ],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "start": "node ./bin/cli.js"
+    "build": "node ./scripts/build-native.js",
+    "notarize": "node ./scripts/notarize-native.js",
+    "prepack": "npm run build",
+    "start": "node ./bin/cli.js",
+    "test": "node --test"
   }
 }
