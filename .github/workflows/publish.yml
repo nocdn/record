@@ -189,4 +189,7 @@ jobs:
         if: steps.check.outputs.release == 'true'
         env:
           RECORD_SKIP_NATIVE_BUILD: "1"
+          # setup-node writes a dummy NODE_AUTH_TOKEN when registry-url is set.
+          # An empty value forces npm 11.5+ to use OIDC trusted publishing.
+          NODE_AUTH_TOKEN: ""
         run: npm publish ${{ steps.check.outputs.publish_flags }}

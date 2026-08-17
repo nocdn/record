@@ -1,8 +1,12 @@
 {
   "name": "@nocdn/record",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Record the Mac screen, system audio, and microphone from the command line",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nocdn/record.git"
+  },
   "type": "module",
   "bin": {
     "record": "bin/cli.js"
