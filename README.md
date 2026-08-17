@@ -17,7 +17,14 @@ npx @nocdn/record
 ```bash
 npx @nocdn/record [options]
 npx @nocdn/record --only-mic
+npx @nocdn/record --internal
+npx @nocdn/record --window Safari
+npx @nocdn/record --region
+npx @nocdn/record --for 30s --in 3
+npx @nocdn/record --here
 npx @nocdn/record mics
+npx @nocdn/record windows
+npx @nocdn/record cameras
 npx @nocdn/record permissions
 ```
 
@@ -25,12 +32,29 @@ npx @nocdn/record permissions
 | --- | --- |
 | `-h`, `--help` | show help |
 | `-v`, `--version` | show version |
-| `-o`, `--output <path>` | save to a specific path instead of the default location |
-| `--only-mic`, `--mic-only`, `--microphone` | record only the microphone as MP3 in the current directory |
+| `-o`, `--output <path>` | save to an exact path instead of the default location |
+| `--location <dir>` | save into this directory with a timestamped name (`--location .`, `--location ~/Pictures`) |
+| `--here` | save into the current directory (same as `--location .`) |
+| `--only-mic`, `--mic-only`, `--microphone` | record only the microphone as MP3 |
+| `--only-system-audio`, `--system-audio-only`, `--internal`, `--internal-only` | record only system/application audio as MP3 |
+| `--only-camera`, `--camera-only` | record only the camera |
 | `--no-mic` | disable microphone capture |
 | `--mic <name>` | select a microphone by name; default is the built-in Mac microphone, not the current system input |
 | `--list-mics` | list microphones that `--mic` can select |
 | `--no-system-audio` | disable system/application audio |
+| `--window`, `--app <name>` | capture a window by app or title instead of the whole display |
+| `--region [x,y,w,h]` | capture a rectangle; omit the value to click-drag one |
+| `--camera [name]` | overlay a face cam in the recording |
+| `--camera-size <0-1>` | face-cam width as a fraction of the video |
+| `--camera-position <pos>` | `bottom-right`, `bottom-left`, `top-right`, or `top-left` |
+| `--for`, `--duration <duration>` | stop and save after this long (`30`, `30s`, `1m30s`) |
+| `--in`, `--delay <duration>` | wait this long before recording starts |
+| `--hevc` | encode video with HEVC instead of H.264 |
+| `--codec <h264\|hevc>` | video codec |
+| `--quality <low\|high>` | simple quality preset; the fine flags override it |
+| `--scale <n>` | scale video (`0.5` or `50`) |
+| `--video-bitrate <rate>` | video bitrate (`8m`, `8000k`) |
+| `--audio-bitrate <rate>` | audio bitrate (`192k`) |
 | `--display <number>` | select a display, starting at `1` |
 | `--fps <number>` | set the frame rate, from greater than `0` through `120` |
 | `--format <mp4\|mov>` | choose the output container |
@@ -39,13 +63,30 @@ npx @nocdn/record permissions
 With no flags, the command records the primary display at native resolution,
 system audio, and the built-in Mac microphone (not whichever input macOS
 currently has set as default), with a visible cursor, at 60 fps, H.264/AAC,
-MP4, and a timestamped file in `~/Movies`. `--no-mic` and `--no-system-audio`
+MP4, and a timestamped file in `~/Downloads`. `--no-mic` and `--no-system-audio`
 turn those audio sources off.
 
+Everything saves to `~/Downloads` by default, audio and video alike.
+`--location <dir>` picks another directory (keeping the timestamped name),
+`--here` saves into the current working directory, and `-o <path>` picks an
+exact file path. Choose only one of them.
+
 `--only-mic` skips the screen and system audio and writes a timestamped `.mp3`
-file in the current working directory. Combine it with `--mic <name>` to pick a
-specific microphone, or `-o` to choose a path. Names can be a full device name
-or a unique substring, for example `--mic "AirPods"`.
+file. `--only-system-audio` (also `--internal` or `--internal-only`) does the
+same for internal audio. `--only-camera` writes a camera-only movie.
+
+`--window Safari` captures that app's window. `--region` with no value lets you
+click-drag a rectangle; `--region 120,80,1280,720` uses display points from the
+top-left of the selected display.
+
+`--for 30s` stops and saves automatically. `--in 3` counts down before capture
+starts. `--camera` puts a face cam in the corner. `--hevc` and `--quality high`
+are the simple video knobs; `--codec`, `--scale`, `--video-bitrate`, and
+`--audio-bitrate` override them.
+
+Combine `--only-mic` with `--mic <name>` to pick a microphone, or `-o` to choose
+a path. Names can be a full device name or a unique substring, for example
+`--mic "AirPods"`.
 
 List the devices `--mic` can use:
 
@@ -53,9 +94,9 @@ List the devices `--mic` can use:
 npx @nocdn/record mics
 ```
 
-Stop with `Ctrl+C` to finalize and save. `Ctrl+D` discards the recording and
-deletes the output file. A second `Ctrl+C` is an emergency force quit and may
-leave an unusable file.
+Stop with `Enter` or `Ctrl+C` to finalize and save. `Ctrl+D` discards the
+recording and deletes the output file. A second `Ctrl+C` is an emergency force
+quit and may leave an unusable file.
 
 ## Permissions
 

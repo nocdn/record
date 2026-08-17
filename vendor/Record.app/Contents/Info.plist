@@ -22,9 +22,11 @@
 	<string>15.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Record uses the camera for a face-cam overlay or camera-only recordings.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Record uses the microphone to include your voice in screen recordings.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Record uses screen capture to save your display and system audio.</string>
+	<string>Record uses screen capture to save your display, a window, a region, and system audio.</string>
 </dict>
 </plist>

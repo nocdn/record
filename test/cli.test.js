@@ -31,6 +31,23 @@ test("help is generated from package metadata and lists recorder options", () =>
   assert.match(result.stdout, /default: 60/);
   assert.match(result.stdout, /MP3/);
   assert.match(result.stdout, /Ctrl\+D/);
+  assert.match(result.stdout, /--window/);
+  assert.match(result.stdout, /--region/);
+  assert.match(result.stdout, /--for/);
+  assert.match(result.stdout, /--only-system-audio/);
+  assert.match(result.stdout, /--internal/);
+  assert.match(result.stdout, /--internal-only/);
+  assert.match(result.stdout, /--only-camera/);
+  assert.match(result.stdout, /--hevc/);
+  assert.match(result.stdout, /--quality/);
+  assert.match(result.stdout, /--here/);
+  assert.match(result.stdout, /--location/);
+  assert.match(result.stdout, /--camera-only/);
+  assert.match(result.stdout, /--duration/);
+  assert.match(result.stdout, /--delay/);
+  assert.match(result.stdout, /--app/);
+  assert.match(result.stdout, /Downloads/);
+  assert.match(result.stdout, /Enter/);
 });
 
 test("version prints the package version", () => {
@@ -55,11 +72,60 @@ test("invalid recording values fail before launching the native helper", () => {
   assert.match(result.stderr, /--fps must be greater than 0/);
 });
 
+test("duration and region flags are validated", () => {
+  assert.match(run("--for", "0").stderr, /--for must be greater than 0/);
+  assert.match(run("--in", "nope").stderr, /--in must look like/);
+  assert.match(run("--region", "1,2").stderr, /x,y,w,h/);
+  assert.match(run("--quality", "ultra").stderr, /low/);
+  assert.match(run("--only-mic", "--camera").stderr, /cannot be combined with --camera/);
+  assert.match(run("--window", "Safari", "--region").stderr, /either --window or --region/);
+});
+
 test("only-mic cannot be combined with no-mic", () => {
   const result = run("--only-mic", "--no-mic");
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /--only-mic option cannot be combined with --no-mic/);
+});
+
+test("internal is an alias for only-system-audio", () => {
+  assert.match(
+    run("--internal", "--no-system-audio").stderr,
+    /--only-system-audio option cannot be combined with --no-system-audio/,
+  );
+  assert.match(
+    run("--internal-only", "--only-mic").stderr,
+    /Choose only one of/,
+  );
+  assert.match(
+    run("--system-audio-only", "--only-camera").stderr,
+    /Choose only one of/,
+  );
+});
+
+test("common-sense aliases map to the canonical flags", () => {
+  assert.match(
+    run("--camera-only", "--only-mic").stderr,
+    /Choose only one of/,
+  );
+  assert.match(run("--duration", "0").stderr, /must be greater than 0/);
+  assert.match(run("--delay", "nope").stderr, /must look like/);
+  assert.match(run("--app", "Safari", "--region").stderr, /either --window or --region/);
+});
+
+test("only one output destination is allowed", () => {
+  assert.match(
+    run("--here", "-o", "out.mp4").stderr,
+    /Choose only one of --output, --location, or --here/,
+  );
+  assert.match(
+    run("--location", os.tmpdir(), "--here").stderr,
+    /Choose only one of --output, --location, or --here/,
+  );
+  assert.match(
+    run("--location", os.tmpdir(), "-o", "out.mp4").stderr,
+    /Choose only one of --output, --location, or --here/,
+  );
 });
 
 test("SIGINT tells a fake helper to stop and save", async () => {
@@ -70,7 +136,7 @@ test("SIGINT tells a fake helper to stop and save", async () => {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  const stdout = await waitForOutput(child, "Press Ctrl+C");
+  const stdout = await waitForOutput(child, "stop and save");
   child.kill("SIGINT");
   const [code, rest] = await waitForClose(child);
 

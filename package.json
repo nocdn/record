@@ -1,6 +1,6 @@
 {
   "name": "@nocdn/record",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Record the Mac screen, system audio, and microphone from the command line",
   "license": "MIT AND LGPL-2.0-only",
   "repository": {

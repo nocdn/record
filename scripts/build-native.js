@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
-const sourcePath = path.join(projectRoot, "native", "record-native.swift");
+const nativeDir = path.join(projectRoot, "native");
+const swiftSources = (await readdir(nativeDir))
+  .filter((name) => name.endsWith(".swift"))
+  .map((name) => path.join(nativeDir, name))
+  .sort();
 const encodeSourcePath = path.join(projectRoot, "native", "mp3_encode.c");
 const bridgingHeaderPath = path.join(projectRoot, "native", "record-bridging.h");
 const shinePath = path.join(projectRoot, "native", "third_party", "shine");
@@ -106,10 +110,14 @@ try {
         "CoreGraphics",
         "-framework",
         "CoreAudio",
+        "-framework",
+        "AppKit",
+        "-framework",
+        "CoreImage",
         "-o",
         temporaryOutputs[index],
         ...objectFiles,
-        sourcePath,
+        ...swiftSources,
       ],
       { cwd: projectRoot, stdio: "inherit" },
     );

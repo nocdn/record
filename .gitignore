@@ -115,3 +115,6 @@ skills/
 .adal/skills/
 .mux/skills/
 .factory/skills/
+
+# npm pack artifacts
+*.tgz
